@@ -1,0 +1,44 @@
+{
+  "dense_baseline": {
+    "config_name": "dense_baseline",
+    "r1": 0.9130434782608695,
+    "r5": 1.0,
+    "mrr": 0.9565217391304348,
+    "r1_count": 21,
+    "r5_count": 23,
+    "total_answerable": 23,
+    "refusal_rate": 0.0,
+    "refusal_correct": 0,
+    "refusal_total": 3,
+    "false_positives": 0,
+    "failures": []
+  },
+  "bm25_sparse": {
+    "config_name": "bm25_sparse",
+    "r1": 0.6956521739130435,
+    "r5": 1.0,
+    "mrr": 0.8297101449275361,
+    "r1_count": 16,
+    "r5_count": 23,
+    "total_answerable": 23,
+    "refusal_rate": 0.0,
+    "refusal_correct": 0,
+    "refusal_total": 3,
+    "false_positives": 0,
+    "failures": []
+  },
+  "production_gated": {
+    "config_name": "production_gated",
+    "r1": 0.9130434782608695,
+    "r5": 1.0,
+    "mrr": 0.9565217391304348,
+    "r1_count": 21,
+    "r5_count": 23,
+    "total_answerable": 23,
+    "refusal_rate": 1.0,
+    "refusal_correct": 3,
+    "refusal_total": 3,
+    "false_positives": 0,
+    "failures": []
+  }
+}

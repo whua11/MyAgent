@@ -318,6 +318,58 @@ class TravelRAGManager:
         ])
         return formatted_tips
 
+    def search_with_gate(self, query: str, city: str = None, top_k: int = 3) -> dict:
+        """
+        带双层拒答门禁的生产级安全检索接口：
+        1. Layer 1 业务范围守卫检查 (Scope Gate)
+        2. 检索相关文档
+        3. Layer 2 事实对齐守卫检查 (Fact Alignment Gate)
+        """
+        from app.knowledge.rejection_gate import rag_rejection_gate
+
+        # 1. 前置范围守卫
+        scope_ok, scope_msg = rag_rejection_gate.check_scope(query, city)
+        if not scope_ok:
+            return {
+                "can_answer": False,
+                "gate": "Layer 1 (Scope Gate)",
+                "reason": scope_msg,
+                "documents": [],
+                "metadatas": [],
+                "formatted_tips": f"【系统安全阻断】: {scope_msg}，建议查询官方渠道。"
+            }
+
+        # 2. 正常检索
+        items = self.search_guides(query=query, city=city, top_k=top_k, return_metadata=True)
+        docs = [item[0] for item in items]
+        metas = [item[1] for item in items]
+
+        # 3. 后置事实对齐守卫
+        align_ok, align_msg = rag_rejection_gate.check_fact_alignment(query, docs)
+        if not align_ok:
+            return {
+                "can_answer": False,
+                "gate": "Layer 2 (Fact Alignment Gate)",
+                "reason": align_msg,
+                "documents": docs,
+                "metadatas": metas,
+                "formatted_tips": f"【系统安全阻断】: {align_msg}，请以景区现场公告为准。"
+            }
+
+        formatted_tips = "\n\n".join([
+            f"【达人避坑/真实攻略片段 {i+1} | 来源: {meta.get('source', '未知')} | 章节: {meta.get('section', '正文')} | 15% Overlap切片】：\n{doc}"
+            for i, (doc, meta) in enumerate(items)
+        ])
+
+        return {
+            "can_answer": True,
+            "gate": "PASS",
+            "reason": "通过双层可答性校验",
+            "documents": docs,
+            "metadatas": metas,
+            "formatted_tips": formatted_tips
+        }
+
 
 # 全局单例导出
 rag_manager = TravelRAGManager()

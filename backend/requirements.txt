@@ -27,3 +27,15 @@ uv>=0.8.0
 # Other utilities
 python-dateutil>=2.8.2
 huggingface_hub>=0.25.0
+
+# Vector RAG & Evaluation
+chromadb>=0.4.0
+fastembed>=0.3.0
+jieba>=0.42.0
+rank-bm25>=0.2.2
+flashrank>=0.2.0
+
+# Multi-Agent Workflow
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langgraph>=0.2.0
