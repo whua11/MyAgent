@@ -16,11 +16,15 @@ import os
 import re
 import json
 import time
+import uuid
+import sqlite3
 import operator
 import requests
+from pathlib import Path
 from typing import TypedDict, Optional, List, Dict, Any, Annotated
 
 from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
 
@@ -207,16 +211,24 @@ class LangGraphTripPlanner:
     """基于 LangGraph 状态图的旅行规划智能体"""
 
     def __init__(self):
-        print("🚀 初始化 LangGraph 多智能体旅行规划系统...")
+        print("🚀 初始化 LangGraph 多智能体旅行规划系统 (带 SqliteSaver 持久化断点恢复)...")
         self.llm = ChatOpenAI(
             model=os.getenv("LLM_MODEL_ID", "deepseek-v4-flash"),
             api_key=os.getenv("LLM_API_KEY"),
             base_url=os.getenv("LLM_BASE_URL"),
             temperature=0.7
         )
+        
+        # 初始化持久化检查点数据库
+        CURRENT_DIR = Path(__file__).resolve().parent
+        db_path = CURRENT_DIR.parent.parent / "data" / "trip_checkpoints.sqlite"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.checkpointer = SqliteSaver(self.conn)
+        
         self.workflow = self._build_graph()
-        self.app = self.workflow.compile()
-        print("✅ LangGraph 状态机编译完成！")
+        self.app = self.workflow.compile(checkpointer=self.checkpointer)
+        print("✅ LangGraph 状态机编译完成 (已挂载 SqliteSaver 持久化检查点)！")
 
     def _build_graph(self) -> StateGraph:
         """构建图拓扑结构"""
@@ -725,30 +737,47 @@ class LangGraphTripPlanner:
 
     # ---------- 外部调用门面函数 ----------
 
-    def plan_trip(self, request: TripRequest) -> TripPlan:
+    def plan_trip(self, request: TripRequest, task_id: Optional[str] = None) -> TripPlan:
         """
-        供 FastAPI 路由层调用的核心入口函数
-        入参: TripRequest
-        出参: TripPlan (内嵌 trace_id)
+        供 FastAPI 路由层调用的核心入口函数（支持断点恢复与幂等命中）
+        入参: TripRequest, task_id(可选)
+        出参: TripPlan (内嵌 trace_id, task_id)
         """
         trace_id = trace_manager.create_trace_id()
+        effective_task_id = task_id or getattr(request, "task_id", None) or f"task_{uuid.uuid4().hex[:10]}"
+        config = {"configurable": {"thread_id": effective_task_id}}
         global_start = time.perf_counter()
+
         try:
-            initial_state: FullTripState = {
-                "request": request,
-                "trace_id": trace_id,
-                "trace_records": [],
-                "search_queries": {},
-                "weather_data": "",
-                "attractions_data": [],
-                "hotel_data": [],
-                "food_data": [],
-                "travel_tips_data": "",
-                "final_plan": None,
-                "retry_count": 0,
-                "validation_error": None
-            }
-            final_state = self.app.invoke(initial_state)
+            # 1. 检查历史检查点快照 (Breakpoint Inspection)
+            snapshot = self.app.get_state(config)
+            if snapshot and snapshot.values and snapshot.values.get("final_plan"):
+                print(f"⚡ [命中幂等快照] 任务 {effective_task_id} 此前已完成，0ms 直接复用历史成果！")
+                plan = snapshot.values["final_plan"]
+                plan.trace_id = trace_id
+                setattr(plan, "task_id", effective_task_id)
+                return plan
+
+            if snapshot and snapshot.next:
+                print(f"🔄 [断点恢复] 检测到任务 {effective_task_id} 历史中断，当前停留在: {snapshot.next}，跳过已完成节点无缝续跑...")
+                final_state = self.app.invoke(None, config=config)
+            else:
+                initial_state: FullTripState = {
+                    "request": request,
+                    "trace_id": trace_id,
+                    "trace_records": [],
+                    "search_queries": {},
+                    "weather_data": "",
+                    "attractions_data": [],
+                    "hotel_data": [],
+                    "food_data": [],
+                    "travel_tips_data": "",
+                    "final_plan": None,
+                    "retry_count": 0,
+                    "validation_error": None
+                }
+                final_state = self.app.invoke(initial_state, config=config)
+
             plan = final_state.get("final_plan")
             if not plan:
                 print("⚠️ 状态机未产出有效 plan，进入优雅兜底...")
@@ -756,37 +785,28 @@ class LangGraphTripPlanner:
 
             total_ms = (time.perf_counter() - global_start) * 1000
             plan.trace_id = trace_id
+            setattr(plan, "task_id", effective_task_id)
             trace_manager.finalize_trace(trace_id, request, total_ms, plan, final_state.get("trace_records", []))
             return plan
+
         except Exception as e:
             print(f"❌ LangGraph 执行失败: {e}，启用终极兜底方案")
             plan = self._create_fallback_plan(request)
             total_ms = (time.perf_counter() - global_start) * 1000
             plan.trace_id = trace_id
+            setattr(plan, "task_id", effective_task_id)
             trace_manager.finalize_trace(trace_id, request, total_ms, plan, [])
             return plan
 
-    def plan_trip_stream(self, request: TripRequest):
+    def plan_trip_stream(self, request: TripRequest, task_id: Optional[str] = None):
         """
-        供 FastAPI SSE 流式接口调用的生成器函数
+        供 FastAPI SSE 流式接口调用的生成器函数 (支持断点恢复与幂等推送)
         在多节点并发执行过程中，实时产出进度事件帧，最后输出完整 TripPlan
         """
         trace_id = trace_manager.create_trace_id()
+        effective_task_id = task_id or getattr(request, "task_id", None) or f"task_{uuid.uuid4().hex[:10]}"
+        config = {"configurable": {"thread_id": effective_task_id}}
         global_start = time.perf_counter()
-        initial_state: FullTripState = {
-            "request": request,
-            "trace_id": trace_id,
-            "trace_records": [],
-            "search_queries": {},
-            "weather_data": "",
-            "attractions_data": [],
-            "hotel_data": [],
-            "food_data": [],
-            "travel_tips_data": "",
-            "final_plan": None,
-            "retry_count": 0,
-            "validation_error": None
-        }
 
         node_messages = {
             "intent_rewrite_node": "🎯 [意图解析] 正在精准分析您的个性化出行与住宿诉求...",
@@ -802,7 +822,48 @@ class LangGraphTripPlanner:
         final_plan = None
         accumulated_records = []
         try:
-            for chunk in self.app.stream(initial_state, stream_mode="updates"):
+            # 1. 检查历史检查点快照
+            snapshot = self.app.get_state(config)
+            
+            # 情况 A: 已经完全跑完了（幂等命中）
+            if snapshot and snapshot.values and snapshot.values.get("final_plan"):
+                final_plan = snapshot.values["final_plan"]
+                final_plan.trace_id = trace_id
+                setattr(final_plan, "task_id", effective_task_id)
+                final_payload = json.dumps({
+                    "type": "complete",
+                    "message": "⚡ [幂等命中] 任务已在历史完成，直接恢复行程展示！",
+                    "trace_id": trace_id,
+                    "task_id": effective_task_id,
+                    "data": final_plan.model_dump()
+                }, ensure_ascii=False)
+                yield f"event: complete\ndata: {final_payload}\n\n"
+                return
+
+            # 情况 B: 历史中断，从断点恢复续跑
+            if snapshot and snapshot.next:
+                resume_msg = f"🔄 [断点恢复] 检测到中断任务，正在从待办节点 {list(snapshot.next)} 恢复执行..."
+                print(resume_msg)
+                yield f"event: progress\ndata: {json.dumps({'type': 'resume', 'task_id': effective_task_id, 'message': resume_msg}, ensure_ascii=False)}\n\n"
+                stream_iter = self.app.stream(None, config=config, stream_mode="updates")
+            else:
+                initial_state: FullTripState = {
+                    "request": request,
+                    "trace_id": trace_id,
+                    "trace_records": [],
+                    "search_queries": {},
+                    "weather_data": "",
+                    "attractions_data": [],
+                    "hotel_data": [],
+                    "food_data": [],
+                    "travel_tips_data": "",
+                    "final_plan": None,
+                    "retry_count": 0,
+                    "validation_error": None
+                }
+                stream_iter = self.app.stream(initial_state, config=config, stream_mode="updates")
+
+            for chunk in stream_iter:
                 for node_name, updated_data in chunk.items():
                     if "trace_records" in updated_data and updated_data["trace_records"]:
                         accumulated_records.extend(updated_data["trace_records"])
@@ -812,6 +873,7 @@ class LangGraphTripPlanner:
                         "type": "progress",
                         "node": node_name,
                         "trace_id": trace_id,
+                        "task_id": effective_task_id,
                         "message": msg
                     }, ensure_ascii=False)
                     yield f"event: progress\ndata: {payload}\n\n"
@@ -824,12 +886,14 @@ class LangGraphTripPlanner:
 
             total_ms = (time.perf_counter() - global_start) * 1000
             final_plan.trace_id = trace_id
+            setattr(final_plan, "task_id", effective_task_id)
             trace_manager.finalize_trace(trace_id, request, total_ms, final_plan, accumulated_records)
 
             final_payload = json.dumps({
                 "type": "complete",
                 "message": "🎉 全部智能体协同规划完成！正在加载可视化地图...",
                 "trace_id": trace_id,
+                "task_id": effective_task_id,
                 "data": final_plan.model_dump()
             }, ensure_ascii=False)
             yield f"event: complete\ndata: {final_payload}\n\n"
@@ -838,11 +902,13 @@ class LangGraphTripPlanner:
             fallback = self._create_fallback_plan(request)
             total_ms = (time.perf_counter() - global_start) * 1000
             fallback.trace_id = trace_id
+            setattr(fallback, "task_id", effective_task_id)
             trace_manager.finalize_trace(trace_id, request, total_ms, fallback, accumulated_records)
             err_payload = json.dumps({
                 "type": "complete",
                 "message": f"⚠️ 规划过程异常，已自动为您启用兜底推荐方案: {e}",
                 "trace_id": trace_id,
+                "task_id": effective_task_id,
                 "data": fallback.model_dump()
             }, ensure_ascii=False)
             yield f"event: complete\ndata: {err_payload}\n\n"

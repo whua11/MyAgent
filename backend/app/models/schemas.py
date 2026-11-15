@@ -43,6 +43,7 @@ class TripRequest(BaseModel):
     # default=[]：不传就空列表
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+    task_id: Optional[str] = Field(default=None, description="任务唯一标识/幂等键(用于故障恢复与断点续跑)", example="task_bj_20261115_001")
 
     class Config:
         # 给 /docs 提供示例，方便你在 Swagger 里一键试用
@@ -219,6 +220,7 @@ class TripPlan(BaseModel):
     budget: Optional[Budget] = Field(default=None, description="预算信息")
     tips: Optional[List[str]] = Field(default_factory=list, description="达人避坑与游玩贴士(来自RAG知识库)")
     trace_id: Optional[str] = Field(default=None, description="链路追踪唯一标识号 (Trace ID)")
+    task_id: Optional[str] = Field(default=None, description="任务唯一标识号 (Task ID)")
 
 
 class TripPlanResponse(BaseModel):
@@ -230,6 +232,7 @@ class TripPlanResponse(BaseModel):
     message: str = Field(default="", description="消息")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
     trace_id: Optional[str] = Field(default=None, description="链路追踪唯一标识号 (Trace ID)")
+    task_id: Optional[str] = Field(default=None, description="任务唯一标识号 (Task ID)")
 
 
 class POIInfo(BaseModel):

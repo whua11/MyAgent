@@ -89,11 +89,13 @@ async def plan_trip(request: TripRequest):
         # 前端 api.ts 拿到后用的是 response.data（axios 层）
         # 再取业务里的 data 字段，即这里的 trip_plan
         trace_id = getattr(trip_plan, "trace_id", None)
+        task_id = getattr(trip_plan, "task_id", getattr(request, "task_id", None))
         return TripPlanResponse(
             success=True,
             message="旅行计划生成成功",
             data=trip_plan,
-            trace_id=trace_id
+            trace_id=trace_id,
+            task_id=task_id
         )
 
     except Exception as e:
@@ -114,13 +116,18 @@ async def plan_trip(request: TripRequest):
 )
 async def plan_trip_stream(request: TripRequest):
     """
-    SSE 流式推流接口：
+    SSE 流式推流接口 (支持断点恢复与防 Nginx 缓冲截留)：
     让前端实时接收 Agent 节点执行事件，避免白屏等待，大幅优化首字体验
     """
     planner = get_langgraph_trip_planner()
     return StreamingResponse(
         planner.plan_trip_stream(request),
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )
 
 
