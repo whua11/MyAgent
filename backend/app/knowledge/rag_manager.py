@@ -320,40 +320,62 @@ class TravelRAGManager:
 
     def search_with_gate(self, query: str, city: str = None, top_k: int = 3) -> dict:
         """
-        带双层拒答门禁的生产级安全检索接口：
-        1. Layer 1 业务范围守卫检查 (Scope Gate)
-        2. 检索相关文档
-        3. Layer 2 事实对齐守卫检查 (Fact Alignment Gate)
+        带双层拒答门禁与诚实降级的生产级安全检索接口：
+        1. Layer 1 业务范围守卫检查 (Scope Gate) - 消除规则盲区
+        2. 检索相关文档与相似度距离
+        3. Layer 1.5 语义距离截断检查 (Distance Guard)
+        4. Layer 2 事实对齐守卫检查 (Fact Alignment Gate) - 阻断高风险未收录政策
+        5. 诚实降级 (Honest Degradation)：被阻断时输出透明安全提示与 Prompt 防护指令，防系统级幻觉
         """
         from app.knowledge.rejection_gate import rag_rejection_gate
 
         # 1. 前置范围守卫
         scope_ok, scope_msg = rag_rejection_gate.check_scope(query, city)
         if not scope_ok:
+            decision = rag_rejection_gate.inspect(query=query, city=city)
             return {
                 "can_answer": False,
-                "gate": "Layer 1 (Scope Gate)",
-                "reason": scope_msg,
+                "gate": decision["gate"],
+                "reason": decision["reason"],
+                "honest_degradation": True,
                 "documents": [],
                 "metadatas": [],
-                "formatted_tips": f"【系统安全阻断】: {scope_msg}，建议查询官方渠道。"
+                "suggested_reply": decision["suggested_reply"],
+                "system_prompt_guard": decision["system_prompt_guard"],
+                "formatted_tips": decision["suggested_reply"]
             }
 
-        # 2. 正常检索
+        # 2. 正常检索文档与距离
         items = self.search_guides(query=query, city=city, top_k=top_k, return_metadata=True)
         docs = [item[0] for item in items]
         metas = [item[1] for item in items]
 
-        # 3. 后置事实对齐守卫
-        align_ok, align_msg = rag_rejection_gate.check_fact_alignment(query, docs)
-        if not align_ok:
+        # 3. 综合多层裁决 (含语义距离与事实对齐)
+        decision = rag_rejection_gate.inspect(query=query, city=city, retrieved_docs=docs)
+        if not decision["can_answer"]:
             return {
                 "can_answer": False,
-                "gate": "Layer 2 (Fact Alignment Gate)",
-                "reason": align_msg,
+                "gate": decision["gate"],
+                "reason": decision["reason"],
+                "honest_degradation": True,
                 "documents": docs,
                 "metadatas": metas,
-                "formatted_tips": f"【系统安全阻断】: {align_msg}，请以景区现场公告为准。"
+                "suggested_reply": decision["suggested_reply"],
+                "system_prompt_guard": decision["system_prompt_guard"],
+                "formatted_tips": decision["suggested_reply"]
+            }
+
+        if not items:
+            return {
+                "can_answer": True,
+                "gate": "PASS_EMPTY",
+                "reason": "通过门禁但库中无对应片区内容",
+                "honest_degradation": True,
+                "documents": [],
+                "metadatas": [],
+                "suggested_reply": "⚠️ 提示：暂未查询到该景点的专属避坑小贴士，建议参考城市通用指南或官方通告。",
+                "system_prompt_guard": "【安全可信指令】未检索到专属攻略片区，请使用通用常识，严禁编造具体票价与特殊限流规定。",
+                "formatted_tips": ""
             }
 
         formatted_tips = "\n\n".join([
@@ -364,9 +386,12 @@ class TravelRAGManager:
         return {
             "can_answer": True,
             "gate": "PASS",
-            "reason": "通过双层可答性校验",
+            "reason": "通过双层可答性与事实对齐校验",
+            "honest_degradation": False,
             "documents": docs,
             "metadatas": metas,
+            "suggested_reply": None,
+            "system_prompt_guard": None,
             "formatted_tips": formatted_tips
         }
 

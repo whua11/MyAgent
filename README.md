@@ -88,6 +88,19 @@ sequenceDiagram
 | **断点续跑 (相同 task_id 重试)** | 读取 SQLite 快照，跳过已完成节点，直接调用 LLM | 51.66s (原需 90s+) | **节省 40%+ 耗时与全部前置高德 API 费用** |
 | **幂等秒级命中 (再次重复请求)** | 命中已完成行程快照，直接内存解析返回 | **0.65 ms** | **毫秒级防重返回，绝对杜绝大模型重复扣费** |
 
+### 3. FastAPI 事件循环阻塞 vs 线程池解耦配对实测 (`backend/test_async_concurrency.py`)
+| 测试实现方案 | 机制行为 | 并发心跳/健康检查延迟 | 事件循环状态 (Loop Health) | 关键结论 |
+|---|---|---|---|---|
+| **错误模式 (async def 中直接同步阻塞)** | 单用户调用 50s 同步工作流，霸占 ASGI 主事件循环线程 | **3113.6 ms (严重卡死)** | 0% 可用 (全局阻塞) | 导致全站轻量接口发生 504 级连超时崩溃 |
+| **工程修复 (asyncio.to_thread 线程分发)** | 将长耗时工作流非阻塞调度至 worker 线程池执行 | **6.15 ms (极速响应)** | **100% 自由流通** | **超 500x 延迟提升，彻底释放主事件循环吞吐量** |
+
+### 4. 数据库表持久化与 B+ 树索引执行计划 (`app/db/dao.py`)
+设计基于 SQLite / SQLAlchemy 的 `trip_records` 业务表，内置复合索引 `Index("idx_city_created", "city", "created_at")`：
+- **命中联合索引最左前缀**：`EXPLAIN QUERY PLAN SELECT ... WHERE city = '北京' ORDER BY created_at DESC`
+  - 引擎解析：`SEARCH trip_records USING INDEX idx_city_created (city=?)`（O(log N) 快速范围扫描，无需全表回表排序）
+- **主键点查**：`EXPLAIN QUERY PLAN SELECT ... WHERE task_id = ?`
+  - 引擎解析：`SEARCH trip_records USING INDEX sqlite_autoindex_trip_records_1 (task_id=?)`（聚簇索引 O(log N) 点查）
+
 ## 📁 项目结构
 
 ```

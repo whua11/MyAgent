@@ -16,7 +16,9 @@
 3. 返回给前端长什么样（TripPlanResponse）
 """
 
-from fastapi import APIRouter, HTTPException
+import os
+import asyncio
+from fastapi import APIRouter, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 # TripRequest: 前端发来的旅行需求（城市、日期、偏好等）
 # TripPlanResponse: 返回给前端的包装结构 {success, message, data}
@@ -26,10 +28,11 @@ from ...models.schemas import (
     ErrorResponse  # 目前本文件未直接使用，保留作错误结构参考
 )
 # 拿到「多智能体旅行规划器」单例（原版与 LangGraph 版）
-import os
 from ...agents.trip_planner_agent import get_trip_planner_agent
 from ...agents.langgraph_trip_planner import get_langgraph_trip_planner
 from ...services.trace_service import trace_manager
+from ...db.dao import trip_record_dao
+from ...core.rate_limiter import llm_rate_limiter
 
 # 创建一个路由分组：
 # - prefix="/trip"：这个文件里的路径都会自动带 /trip
@@ -74,14 +77,16 @@ async def plan_trip(request: TripRequest):
         # 默认使用 LangGraph 并发状态图引擎，可通过 .env 设置 USE_LANGGRAPH=false 切回原版
         use_langgraph = os.getenv("USE_LANGGRAPH", "true").lower() in ("true", "1", "yes")
 
+        # 🛡️ P0 级后端工程修复：使用 asyncio.to_thread 将耗时 50~90s 的同步长任务分发至 worker 线程池
+        # 彻底解决在 async def 中调用同步阻塞代码霸占 asyncio 事件循环的严重性能故障 (5.5s vs 2ms)
         if use_langgraph:
-            print("⚡ [引擎调度] 启用【LangGraph 并发状态图智能体引擎】")
+            print("⚡ [引擎调度] 启用【LangGraph 并发状态图智能体引擎 (asyncio.to_thread 异步分发)】")
             planner = get_langgraph_trip_planner()
-            trip_plan = planner.plan_trip(request)
+            trip_plan = await asyncio.to_thread(planner.plan_trip, request, request.task_id)
         else:
-            print("🤖 [引擎调度] 启用【原版 HelloAgents 线性流水线引擎】")
+            print("🤖 [引擎调度] 启用【原版 HelloAgents 线性流水线引擎 (asyncio.to_thread 异步分发)】")
             agent = get_trip_planner_agent()
-            trip_plan = agent.plan_trip(request)
+            trip_plan = await asyncio.to_thread(agent.plan_trip, request)
 
         print("✅ 旅行计划生成成功,准备返回响应\n")
 
@@ -112,16 +117,30 @@ async def plan_trip(request: TripRequest):
 @router.post(
     "/plan/stream",
     summary="生成旅行计划 (SSE 流式推流)",
-    description="基于 Server-Sent Events (SSE) 实时推送智能体各节点的执行状态与最终规划方案"
+    description="基于 Server-Sent Events (SSE) 实时推送智能体各节点的执行状态与最终规划方案，并支持客户端掉线熔断"
 )
-async def plan_trip_stream(request: TripRequest):
+async def plan_trip_stream(request: TripRequest, http_request: Request):
     """
-    SSE 流式推流接口 (支持断点恢复与防 Nginx 缓冲截留)：
-    让前端实时接收 Agent 节点执行事件，避免白屏等待，大幅优化首字体验
+    SSE 流式推流接口 (支持断点恢复、防 Nginx 缓冲截留与客户端掉线感知)：
+    在推流过程中实时检测客户端连接状态，客户端断开立即熔断下游计算，杜绝僵尸任务
     """
     planner = get_langgraph_trip_planner()
+
+    async def event_generator():
+        try:
+            for event in planner.plan_trip_stream(request):
+                # 🛡️ 客户端掉线主动嗅探：如果用户关闭浏览器/断网，立即熔断下游生成
+                if await http_request.is_disconnected():
+                    print("🛑 [SSE 推流中止] 检测到客户端已主动断开连接 (is_disconnected)，熔断下游计算！")
+                    break
+                yield event
+                await asyncio.sleep(0.01)  # 让出协程时间片给其他并发请求
+        except asyncio.CancelledError:
+            print("🛑 [SSE 任务取消] 接收到 CancelledError 信号，优雅终止生成")
+            raise
+
     return StreamingResponse(
-        planner.plan_trip_stream(request),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -129,6 +148,42 @@ async def plan_trip_stream(request: TripRequest):
             "X-Accel-Buffering": "no"
         }
     )
+
+
+# ==============================================================
+# 数据库持久化、B+树索引与限流观测接口
+# ==============================================================
+
+@router.get(
+    "/records",
+    summary="获取持久化行程记录列表 (带 B+ 树索引查询)",
+    description="从 trip_records 业务表中查询历史行程，支持按城市与状态过滤"
+)
+async def list_trip_records(city: str = None, status: str = None, limit: int = 20):
+    """从数据库持久化表中分页读取历史规划记录"""
+    records = trip_record_dao.list_records(city=city, status=status, limit=limit)
+    return {"success": True, "count": len(records), "data": records}
+
+
+@router.get(
+    "/explain-plan",
+    summary="查看数据库执行计划 (EXPLAIN QUERY PLAN)",
+    description="演示 SQLite/B+ 树联合索引最左前缀匹配与主键索引点查的执行计划分析"
+)
+async def explain_query_plan():
+    """执行计划分析接口，直接查看联合索引与主键点查的底层执行步骤"""
+    plans = trip_record_dao.explain_query_plans()
+    return {"success": True, "data": plans}
+
+
+@router.get(
+    "/limiter-metrics",
+    summary="获取并发限流与削峰熔断指标",
+    description="查看当前系统的并发信号量占用数、总执行次数与 429 退避重试统计"
+)
+async def get_limiter_metrics():
+    """查看当前并发信号量与重试器运行指标"""
+    return {"success": True, "data": llm_rate_limiter.get_metrics()}
 
 
 @router.get(

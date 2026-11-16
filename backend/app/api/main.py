@@ -19,6 +19,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
+from ..db.database import init_db
 # trip: 旅行规划；poi: 景点图片/详情；map_routes: 地图相关接口
 from .routes import trip, poi, map as map_routes
 
@@ -79,6 +80,10 @@ async def startup_event():
         print(f"\n❌ 配置验证失败:\n{e}")
         print("\n请检查.env文件并确保所有必要的配置项都已设置")
         raise
+
+    # 初始化数据库表结构与 B+ 树索引
+    init_db()
+    print("💾 业务数据库表结构与索引初始化完成")
 
     print("\n" + "="*60)
     print("📚 API文档: http://localhost:8000/docs")

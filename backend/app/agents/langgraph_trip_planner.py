@@ -42,6 +42,7 @@ from ..models.schemas import (
 from ..config import get_settings
 from ..knowledge.rag_manager import rag_manager
 from ..services.trace_service import trace_manager
+from ..db.dao import trip_record_dao
 
 
 # ==============================================================
@@ -117,6 +118,7 @@ class FullTripState(TypedDict):
     hotel_data: List[Dict[str, Any]]
     food_data: List[Dict[str, Any]]
     travel_tips_data: str  # RAG 检索出的避坑攻略上下文
+    system_guard_instruction: Optional[str]  # 双阶段门禁安全防护与防幻觉指令
     final_plan: Optional[TripPlan]
     retry_count: int
     validation_error: Optional[str]
@@ -481,22 +483,43 @@ class LangGraphTripPlanner:
         sq = state.get("search_queries", {})
         rag_target = sq.get("rag_kw") or " ".join(req.preferences)
         print(f"📚 [LangGraph-RAG节点] 正在从本地向量库并发检索 {req.city} 旅游避坑与门票指南...")
-        tips = rag_manager.get_travel_tips(destination=req.city, preferences=[rag_target] if rag_target else req.preferences)
+        
+        # 🛡️ 工业级双阶段拒答门禁接线 (Gate Wiring) + 诚实降级 (Honest Degradation)
+        rag_query = f"{req.city} {rag_target} 景点门票预约 开放时间 避坑指南"
+        gate_res = rag_manager.search_with_gate(query=rag_query, city=req.city, top_k=3)
+        can_answer = gate_res.get("can_answer", True)
+        gate_name = gate_res.get("gate", "PASS")
+        reason = gate_res.get("reason", "")
+        tips = gate_res.get("formatted_tips", "")
+        system_guard = gate_res.get("system_prompt_guard") or ""
         dur_ms = (time.perf_counter() - t0) * 1000
-        hit = bool(tips)
+
+        if not can_answer:
+            print(f"🛡️ [LangGraph-RAG门禁阻断] 触发 {gate_name}: {reason} -> 启动诚实降级！")
+            rec_status = "WARNING"
+            rec_summary = f"RAG门禁阻断({gate_name}): {reason} -> 诚实降级"
+        else:
+            if tips:
+                print(f"📖 [LangGraph-RAG节点] 门禁 PASS，成功匹配到真实本地避坑攻略，准备注入规划大脑！")
+                rec_summary = "RAG门禁 PASS，命中本地避坑知识库"
+            else:
+                print(f"📖 [LangGraph-RAG节点] 门禁 PASS，无特定切片，使用通用策略")
+                rec_summary = "RAG门禁 PASS(无切片，通用策略)"
+            rec_status = "SUCCESS"
+
         rec = trace_manager.build_record(
             node_name="rag_node",
             duration_ms=dur_ms,
-            status="SUCCESS",
-            summary="命中本地避坑知识库" if hit else "未命中本地避坑库(使用通用常识)",
-            inputs={"destination": req.city, "rag_target": rag_target},
-            outputs={"hit": hit, "tips_length": len(tips) if tips else 0}
+            status=rec_status,
+            summary=rec_summary,
+            inputs={"destination": req.city, "rag_target": rag_target, "gate": gate_name},
+            outputs={"can_answer": can_answer, "gate": gate_name, "reason": reason, "tips_length": len(tips)}
         )
-        if tips:
-            print(f"📖 [LangGraph-RAG节点] 成功匹配到真实本地避坑攻略，准备注入规划大脑！")
-        else:
-            print(f"📖 [LangGraph-RAG节点] 未命中特定本地避坑库，使用通用推荐策略")
-        return {"travel_tips_data": tips, "trace_records": [rec]}
+        return {
+            "travel_tips_data": tips,
+            "system_guard_instruction": system_guard,
+            "trace_records": [rec]
+        }
 
     def _planner_node(self, state: FullTripState) -> dict:
         t0 = time.perf_counter()
@@ -526,6 +549,8 @@ class LangGraphTripPlanner:
         ]) or "由旅客自理或品尝沿途小吃"
 
         rag_tips_text = state.get("travel_tips_data") or "暂无特定避坑库，遵循常规出行游玩常识"
+        guard_instruction = state.get("system_guard_instruction") or ""
+        guard_section = f"\n【最高安全与诚实准则 (系统级防幻觉门禁)】\n{guard_instruction}\n" if guard_instruction else ""
 
         feedback = f"\n⚠️ 上一次生成未通过质检：【{err}】，本次请务必针对性改进！\n" if err else ""
 
@@ -537,7 +562,7 @@ class LangGraphTripPlanner:
 住宿偏好: {req.accommodation}
 旅行风格偏好: {', '.join(req.preferences) if req.preferences else '综合游'}
 额外特定要求: {req.free_text_input or '无特殊要求'}
-{feedback}
+{feedback}{guard_section}
 
 【本地旅游避坑与门票预约指南 (本地向量库 RAG 知识检索)】
 {rag_tips_text}
@@ -749,6 +774,21 @@ class LangGraphTripPlanner:
         global_start = time.perf_counter()
 
         try:
+            # 0. 记录任务启动进持久化业务表 (PENDING -> RUNNING)
+            try:
+                trip_record_dao.create_or_mark_running(
+                    task_id=effective_task_id,
+                    city=request.city,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    travel_days=request.travel_days,
+                    transportation=request.transportation,
+                    accommodation=request.accommodation,
+                    trace_id=trace_id
+                )
+            except Exception as db_e:
+                print(f"⚠️ [DB] 任务记录启动异常: {db_e}")
+
             # 1. 检查历史检查点快照 (Breakpoint Inspection)
             snapshot = self.app.get_state(config)
             if snapshot and snapshot.values and snapshot.values.get("final_plan"):
@@ -772,6 +812,7 @@ class LangGraphTripPlanner:
                     "hotel_data": [],
                     "food_data": [],
                     "travel_tips_data": "",
+                    "system_guard_instruction": None,
                     "final_plan": None,
                     "retry_count": 0,
                     "validation_error": None
@@ -786,11 +827,28 @@ class LangGraphTripPlanner:
             total_ms = (time.perf_counter() - global_start) * 1000
             plan.trace_id = trace_id
             setattr(plan, "task_id", effective_task_id)
+
+            # 持久化成功结果到业务表 (COMPLETED)
+            try:
+                plan_dict = plan.dict() if hasattr(plan, "dict") else plan.model_dump()
+                budget_total = plan.budget.total if plan.budget else 0.0
+                trip_record_dao.save_completed_plan(
+                    task_id=effective_task_id,
+                    plan_dict=plan_dict,
+                    budget_total=budget_total
+                )
+            except Exception as db_e:
+                print(f"⚠️ [DB] 保存完成行程异常: {db_e}")
+
             trace_manager.finalize_trace(trace_id, request, total_ms, plan, final_state.get("trace_records", []))
             return plan
 
         except Exception as e:
             print(f"❌ LangGraph 执行失败: {e}，启用终极兜底方案")
+            try:
+                trip_record_dao.mark_failed(task_id=effective_task_id, error_msg=str(e))
+            except Exception:
+                pass
             plan = self._create_fallback_plan(request)
             total_ms = (time.perf_counter() - global_start) * 1000
             plan.trace_id = trace_id

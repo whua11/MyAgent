@@ -49,8 +49,16 @@ yarn-debug.log*
 yarn-error.log*
 backend/data/*.sqlite
 backend/data/*.sqlite*
+backend/data/*.db
+backend/data/*.db*
 *.sqlite-journal
 *.sqlite3-journal
+*.db-journal
+
+# 个人隐私简历与Office临时文件
+~$*
+*.docx
+*.pdf
 
 # ==========================================
 # IDE 与操作系统临时文件

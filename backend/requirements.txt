@@ -39,3 +39,9 @@ flashrank>=0.2.0
 langchain>=0.2.0
 langchain-openai>=0.1.0
 langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
+
+# Database & Concurrency Resilience
+sqlalchemy>=2.0.0
+aiosqlite>=0.20.0
+tenacity>=8.2.0
