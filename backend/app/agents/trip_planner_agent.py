@@ -607,13 +607,14 @@ class MultiAgentTripPlanner:
                 accommodation=request.accommodation,
                 attractions=[
                     Attraction(
-                        name=f"{request.city}景点{j+1}",
-                        address=f"{request.city}市",
-                        # 这里坐标是占位，不是真实地理编码结果
-                        location=Location(longitude=116.4 + i*0.01 + j*0.005, latitude=39.9 + i*0.01 + j*0.005),
+                        name=f"{request.city}核心推荐区域{j+1}（建议现场规划）",
+                        address=f"{request.city}市核心商圈",
+                        # 诚实置空：绝不捏造北京 116.4 虚假经纬度
+                        location=None,
                         visit_duration=120,
-                        description=f"这是{request.city}的著名景点",
-                        category="景点"
+                        description=f"因触发系统诚实降级保护，未编造具体POI，建议现场使用地图APP导航游览{request.city}知名景区",
+                        category="景点",
+                        ticket_price=0
                     )
                     for j in range(2)
                 ],
@@ -642,8 +643,10 @@ class MultiAgentTripPlanner:
             end_date=request.end_date,
             days=days,
             weather_info=[],
-            overall_suggestions=f"这是为您规划的{request.city}{request.travel_days}日游行程,建议提前查看各景点的开放时间。",
-            tips=fallback_tips
+            overall_suggestions=f"【诚实降级提醒】这是为您规划的{request.city}{request.travel_days}日游基础框架，未伪造未经核实的经纬度坐标，请以官方公告为准。",
+            tips=fallback_tips,
+            degraded=True,
+            degrade_reason="服务异常或解析失败，已触发系统诚实降级保护"
         )
 
 

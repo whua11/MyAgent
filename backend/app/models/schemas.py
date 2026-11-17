@@ -92,7 +92,7 @@ class Attraction(BaseModel):
     """单个景点（出现在 DayPlan.attractions 里）"""
     name: str = Field(..., description="景点名称")
     address: str = Field(..., description="地址")
-    location: Location = Field(..., description="经纬度坐标")
+    location: Optional[Location] = Field(default=None, description="经纬度坐标")
     visit_duration: int = Field(..., description="建议游览时间(分钟)")
     description: str = Field(..., description="景点描述")
     category: Optional[str] = Field(default="景点", description="景点类别")
@@ -221,6 +221,8 @@ class TripPlan(BaseModel):
     tips: Optional[List[str]] = Field(default_factory=list, description="达人避坑与游玩贴士(来自RAG知识库)")
     trace_id: Optional[str] = Field(default=None, description="链路追踪唯一标识号 (Trace ID)")
     task_id: Optional[str] = Field(default=None, description="任务唯一标识号 (Task ID)")
+    degraded: bool = Field(default=False, description="是否为诚实降级兜底方案")
+    degrade_reason: Optional[str] = Field(default=None, description="触发降级的原因说明")
 
 
 class TripPlanResponse(BaseModel):
@@ -233,6 +235,8 @@ class TripPlanResponse(BaseModel):
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
     trace_id: Optional[str] = Field(default=None, description="链路追踪唯一标识号 (Trace ID)")
     task_id: Optional[str] = Field(default=None, description="任务唯一标识号 (Task ID)")
+    degraded: bool = Field(default=False, description="是否为诚实降级兜底方案")
+    degrade_reason: Optional[str] = Field(default=None, description="触发降级的原因说明")
 
 
 class POIInfo(BaseModel):

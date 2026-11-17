@@ -95,12 +95,17 @@ async def plan_trip(request: TripRequest):
         # 再取业务里的 data 字段，即这里的 trip_plan
         trace_id = getattr(trip_plan, "trace_id", None)
         task_id = getattr(trip_plan, "task_id", getattr(request, "task_id", None))
+        degraded = getattr(trip_plan, "degraded", False)
+        degrade_reason = getattr(trip_plan, "degrade_reason", None)
+        message = "旅行计划生成成功" if not degraded else f"已生成诚实降级方案: {degrade_reason}"
         return TripPlanResponse(
             success=True,
-            message="旅行计划生成成功",
+            message=message,
             data=trip_plan,
             trace_id=trace_id,
-            task_id=task_id
+            task_id=task_id,
+            degraded=degraded,
+            degrade_reason=degrade_reason
         )
 
     except Exception as e:

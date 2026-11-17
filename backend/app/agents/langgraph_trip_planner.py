@@ -88,14 +88,20 @@ def amap_poi_tool(keywords: str, city: str, limit: int = 5) -> List[Dict[str, An
         if res.get("status") == "1" and res.get("pois"):
             results = []
             for p in res["pois"][:limit]:
-                loc_str = p.get("location") or "116.397,39.916"
-                lng, lat = (loc_str.split(",") + ["0", "0"])[:2]
+                loc_str = p.get("location")
+                if loc_str and "," in str(loc_str):
+                    parts = str(loc_str).split(",")
+                    longitude = float(parts[0]) if len(parts) > 0 else None
+                    latitude = float(parts[1]) if len(parts) > 1 else None
+                else:
+                    longitude = None
+                    latitude = None
                 results.append({
                     "name": p.get("name"),
                     "address": p.get("address") or "地址详见地图",
                     "type": p.get("type", "旅游景点"),
-                    "longitude": float(lng),
-                    "latitude": float(lat)
+                    "longitude": longitude,
+                    "latitude": latitude
                 })
             return results
         return []
@@ -689,8 +695,15 @@ class LangGraphTripPlanner:
         # 校验并生成 TripPlan
         return TripPlan(**data)
 
-    def _create_fallback_plan(self, request: TripRequest) -> TripPlan:
-        """终极兜底方案：保证接口绝对不崩溃"""
+    def _create_fallback_plan(self, request: TripRequest, reason: str = "服务暂时不可用或大模型生成异常") -> TripPlan:
+        """
+        终极诚实降级方案 (Honest Degradation Fallback):
+        核心准则（彻底消除系统级幻觉）：
+        1. 绝不伪造虚假经纬度坐标（不强塞北京 116.397 坐标给其他城市，location 明确置 None）
+        2. 绝不捏造未经验证的虚假酒店名称或虚假门票价格（ticket_price=0，名称诚实说明为规划建议区）
+        3. 显式标记 degraded=True 与 degrade_reason，让前端与用户透明感知降级状态
+        4. 注入诚实避坑警示，指引用户通过官方渠道核实
+        """
         from datetime import datetime, timedelta
         start_dt = datetime.strptime(request.start_date, "%Y-%m-%d")
         days = []
@@ -699,34 +712,34 @@ class LangGraphTripPlanner:
             days.append(DayPlan(
                 date=cur_date,
                 day_index=i,
-                description=f"第 {i+1} 天：{request.city}核心名胜漫步",
+                description=f"第 {i+1} 天：{request.city}核心名胜区自主漫步建议",
                 transportation=request.transportation,
                 accommodation=request.accommodation,
                 hotel=Hotel(
-                    name=f"{request.city}品质酒店",
-                    address=f"{request.city}市中心商圈",
-                    location=Location(longitude=116.397, latitude=39.916),
-                    price_range="300-500元",
-                    rating="4.6",
-                    distance="距中心2km",
+                    name=f"{request.city}市区推荐住宿商圈（建议实名预订）",
+                    address=f"{request.city}核心商圈",
+                    location=None,  # 诚实置空：未获真实高德定位前绝不伪造假经纬度
+                    price_range="以平台实时报价为准",
+                    rating="4.5",
+                    distance="交通便利区域",
                     type=request.accommodation,
-                    estimated_cost=350
+                    estimated_cost=300
                 ),
                 attractions=[
                     Attraction(
-                        name=f"{request.city}著名古迹景点",
-                        address=f"{request.city}核心风景区",
-                        location=Location(longitude=116.397, latitude=39.916),
-                        visit_duration=150,
-                        description=f"感受{request.city}深厚历史文化底蕴",
+                        name=f"{request.city}核心名胜区域（建议现场规划）",
+                        address=f"{request.city}市主要文旅区",
+                        location=None,  # 诚实置空：绝不捏造跨城假坐标
+                        visit_duration=180,
+                        description=f"因触发系统诚实降级保护，未捏造具体景点POI。建议优先游览{request.city}官方文旅推荐名胜，出行前请通过地图APP实名导航。",
                         category="名胜古迹",
-                        ticket_price=60
+                        ticket_price=0
                     )
                 ],
                 meals=[
                     Meal(type="breakfast", name="当地特色早餐", description="品尝地道早点", estimated_cost=25),
-                    Meal(type="lunch", name="老字号餐厅", description="特色传统午餐", estimated_cost=65),
-                    Meal(type="dinner", name="风味晚餐", description="夜景与美食", estimated_cost=85)
+                    Meal(type="lunch", name="老字号风味午餐", description="特色传统午餐", estimated_cost=60),
+                    Meal(type="dinner", name="当地特色晚餐", description="当地招牌菜系", estimated_cost=80)
                 ]
             ))
 
@@ -734,7 +747,10 @@ class LangGraphTripPlanner:
             city=request.city,
             start_date=request.start_date,
             end_date=request.end_date,
-            overall_suggestions=f"为您量身定制的{request.city}旅行计划，建议出行前关注实时交通与景区开放时间。",
+            overall_suggestions=(
+                f"【系统诚实降级提醒】已为您生成{request.city}基础行程框架。"
+                f"当前因【{reason}】触发了安全降级保护。为杜绝系统级幻觉，本方案未编造任何未经核实的经纬度与假门票，请以当地实时官方指南为准。"
+            ),
             days=days,
             weather_info=[
                 WeatherInfo(
@@ -748,16 +764,19 @@ class LangGraphTripPlanner:
                 )
             ],
             tips=[
-                f"建议提前关注{request.city}热门景区的预约放票规则",
-                "出行准备轻便运动鞋与适宜天气的衣物"
+                f"⚠️ 【诚实降级声明】因底层服务异常，本方案为系统安全降级产物，已剔除全部虚假POI经纬度与假门票",
+                f"出行前请务必通过{request.city}官方文旅公众号或正规售票渠道核实开放状态与预约规则",
+                "建议通过高德地图/携程等平台实名查询当地酒店与餐饮营业信息，切勿轻信黄牛代购"
             ],
             budget=Budget(
-                total_attractions=60 * request.travel_days,
-                total_hotels=350 * request.travel_days,
-                total_meals=175 * request.travel_days,
-                total_transportation=50 * request.travel_days,
-                total=(60 + 350 + 175 + 50) * request.travel_days
-            )
+                total_attractions=0,
+                total_hotels=300 * request.travel_days,
+                total_meals=165 * request.travel_days,
+                total_transportation=40 * request.travel_days,
+                total=(0 + 300 + 165 + 40) * request.travel_days
+            ),
+            degraded=True,
+            degrade_reason=reason
         )
 
     # ---------- 外部调用门面函数 ----------
@@ -822,7 +841,7 @@ class LangGraphTripPlanner:
             plan = final_state.get("final_plan")
             if not plan:
                 print("⚠️ 状态机未产出有效 plan，进入优雅兜底...")
-                plan = self._create_fallback_plan(request)
+                plan = self._create_fallback_plan(request, reason="状态机未产出有效行程方案")
 
             total_ms = (time.perf_counter() - global_start) * 1000
             plan.trace_id = trace_id
@@ -832,10 +851,14 @@ class LangGraphTripPlanner:
             try:
                 plan_dict = plan.dict() if hasattr(plan, "dict") else plan.model_dump()
                 budget_total = plan.budget.total if plan.budget else 0.0
+                is_degraded = getattr(plan, "degraded", False)
+                degrade_reason = getattr(plan, "degrade_reason", None)
                 trip_record_dao.save_completed_plan(
                     task_id=effective_task_id,
                     plan_dict=plan_dict,
-                    budget_total=budget_total
+                    budget_total=budget_total,
+                    is_degraded=is_degraded,
+                    degrade_reason=degrade_reason
                 )
             except Exception as db_e:
                 print(f"⚠️ [DB] 保存完成行程异常: {db_e}")
@@ -845,11 +868,19 @@ class LangGraphTripPlanner:
 
         except Exception as e:
             print(f"❌ LangGraph 执行失败: {e}，启用终极兜底方案")
+            plan = self._create_fallback_plan(request, reason=f"执行异常: {str(e)}")
             try:
-                trip_record_dao.mark_failed(task_id=effective_task_id, error_msg=str(e))
+                plan_dict = plan.dict() if hasattr(plan, "dict") else plan.model_dump()
+                budget_total = plan.budget.total if plan.budget else 0.0
+                trip_record_dao.save_completed_plan(
+                    task_id=effective_task_id,
+                    plan_dict=plan_dict,
+                    budget_total=budget_total,
+                    is_degraded=True,
+                    degrade_reason=f"执行异常兜底: {str(e)}"
+                )
             except Exception:
                 pass
-            plan = self._create_fallback_plan(request)
             total_ms = (time.perf_counter() - global_start) * 1000
             plan.trace_id = trace_id
             setattr(plan, "task_id", effective_task_id)

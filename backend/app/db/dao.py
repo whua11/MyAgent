@@ -58,14 +58,22 @@ class TripRecordDAO:
             return record
 
     @staticmethod
-    def save_completed_plan(task_id: str, plan_dict: dict, budget_total: float = 0.0) -> Optional[TripRecord]:
-        """任务成功完成时保存：写入完整 JSON 与状态 COMPLETED"""
+    def save_completed_plan(
+        task_id: str,
+        plan_dict: dict,
+        budget_total: float = 0.0,
+        is_degraded: bool = False,
+        degrade_reason: Optional[str] = None
+    ) -> Optional[TripRecord]:
+        """任务成功完成时保存：写入完整 JSON、状态 COMPLETED 与是否诚实降级标识"""
         with SessionLocal() as db:
             record = db.query(TripRecord).filter(TripRecord.task_id == task_id).first()
             if record:
                 record.status = "COMPLETED"
                 record.budget_total = budget_total
                 record.plan_json = json.dumps(plan_dict, ensure_ascii=False)
+                record.is_degraded = 1 if is_degraded else 0
+                record.degrade_reason = degrade_reason
                 record.updated_at = datetime.utcnow()
                 db.commit()
                 db.refresh(record)
@@ -110,7 +118,7 @@ class TripRecordDAO:
             res_leftmost = db.execute(text(sql_leftmost)).fetchall()
             leftmost_plan = [dict(row._mapping) for row in res_leftmost]
 
-            # 案例 2: 单独查 task_id (主键聚簇索引等值查找)
+            # 案例 2: 单独查 task_id (主键唯一索引等值查找)
             sql_pk = "EXPLAIN QUERY PLAN SELECT * FROM trip_records WHERE task_id = 'test_123'"
             res_pk = db.execute(text(sql_pk)).fetchall()
             pk_plan = [dict(row._mapping) for row in res_pk]
